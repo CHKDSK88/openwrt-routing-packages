@@ -1,0 +1,108 @@
+From 58a1a6b01e5116559e5645ffb76b45a82871a03d Mon Sep 17 00:00:00 2001
+From: Pawel Dembicki <p.dembicki@wb.com.pl>
+Date: Fri, 14 Jun 2019 12:28:00 +0200
+Subject: [PATCH] eigrpd: Fix endianness issue in packets
+
+Net prefixes in eigrp update packets is created and read
+without check host endianness.
+
+This patch use ntohl and htonl to read and write ip prefix
+from and to packet.
+
+Tested: x86, powerpc
+
+Signed-off-by: Pawel Dembicki <p.dembicki@wb.com.pl>
+---
+ eigrpd/eigrp_packet.c  | 46 ++++++++++++++----------------------------
+ eigrpd/eigrp_structs.h |  1 -
+ 2 files changed, 15 insertions(+), 32 deletions(-)
+
+diff --git a/eigrpd/eigrp_packet.c b/eigrpd/eigrp_packet.c
+index bedaf15c4..4efb91e4a 100644
+--- a/eigrpd/eigrp_packet.c
++++ b/eigrpd/eigrp_packet.c
+@@ -1114,6 +1114,7 @@ static struct TLV_IPv4_Internal_type *eigrp_IPv4_InternalTLV_new(void)
+ struct TLV_IPv4_Internal_type *eigrp_read_ipv4_tlv(struct stream *s)
+ {
+ 	struct TLV_IPv4_Internal_type *tlv;
++	uint32_t destination_tmp;
+ 
+ 	tlv = eigrp_IPv4_InternalTLV_new();
+ 
+@@ -1133,31 +1134,16 @@ struct TLV_IPv4_Internal_type *eigrp_read_ipv4_tlv(struct stream *s)
+ 
+ 	tlv->prefix_length = stream_getc(s);
+ 
+-	if (tlv->prefix_length <= 8) {
+-		tlv->destination_part[0] = stream_getc(s);
+-		tlv->destination.s_addr = (tlv->destination_part[0]);
+-	} else if (tlv->prefix_length > 8 && tlv->prefix_length <= 16) {
+-		tlv->destination_part[0] = stream_getc(s);
+-		tlv->destination_part[1] = stream_getc(s);
+-		tlv->destination.s_addr = ((tlv->destination_part[1] << 8)
+-					   + tlv->destination_part[0]);
+-	} else if (tlv->prefix_length > 16 && tlv->prefix_length <= 24) {
+-		tlv->destination_part[0] = stream_getc(s);
+-		tlv->destination_part[1] = stream_getc(s);
+-		tlv->destination_part[2] = stream_getc(s);
+-		tlv->destination.s_addr = ((tlv->destination_part[2] << 16)
+-					   + (tlv->destination_part[1] << 8)
+-					   + tlv->destination_part[0]);
+-	} else if (tlv->prefix_length > 24 && tlv->prefix_length <= 32) {
+-		tlv->destination_part[0] = stream_getc(s);
+-		tlv->destination_part[1] = stream_getc(s);
+-		tlv->destination_part[2] = stream_getc(s);
+-		tlv->destination_part[3] = stream_getc(s);
+-		tlv->destination.s_addr = ((tlv->destination_part[3] << 24)
+-					   + (tlv->destination_part[2] << 16)
+-					   + (tlv->destination_part[1] << 8)
+-					   + tlv->destination_part[0]);
+-	}
++	destination_tmp = stream_getc(s) << 24;
++	if (tlv->prefix_length > 8)
++		destination_tmp |= stream_getc(s) << 16;
++	if (tlv->prefix_length > 16)
++		destination_tmp |= stream_getc(s) << 8;
++	if (tlv->prefix_length > 24)
++		destination_tmp |= stream_getc(s);
++
++	tlv->destination.s_addr = htonl(destination_tmp);
++
+ 	return tlv;
+ }
+ 
+@@ -1234,15 +1220,13 @@ uint16_t eigrp_add_internalTLV_to_stream(struct stream *s,
+ 
+ 	stream_putc(s, pe->destination->prefixlen);
+ 
+-	stream_putc(s, pe->destination->u.prefix4.s_addr & 0xFF);
++	stream_putc(s, (ntohl(pe->destination->u.prefix4.s_addr) >> 24) & 0xFF);
+ 	if (pe->destination->prefixlen > 8)
+-		stream_putc(s, (pe->destination->u.prefix4.s_addr >> 8) & 0xFF);
++		stream_putc(s, (ntohl(pe->destination->u.prefix4.s_addr) >> 16) & 0xFF);
+ 	if (pe->destination->prefixlen > 16)
+-		stream_putc(s,
+-			    (pe->destination->u.prefix4.s_addr >> 16) & 0xFF);
++		stream_putc(s, (ntohl(pe->destination->u.prefix4.s_addr) >> 8) & 0xFF);
+ 	if (pe->destination->prefixlen > 24)
+-		stream_putc(s,
+-			    (pe->destination->u.prefix4.s_addr >> 24) & 0xFF);
++		stream_putc(s, ntohl(pe->destination->u.prefix4.s_addr) & 0xFF);
+ 
+ 	return length;
+ }
+diff --git a/eigrpd/eigrp_structs.h b/eigrpd/eigrp_structs.h
+index a78e5a53c..1b9186f01 100644
+--- a/eigrpd/eigrp_structs.h
++++ b/eigrpd/eigrp_structs.h
+@@ -409,7 +409,6 @@ struct TLV_IPv4_Internal_type {
+ 
+ 	uint8_t prefix_length;
+ 
+-	unsigned char destination_part[4];
+ 	struct in_addr destination;
+ } __attribute__((packed));
+ 
+-- 
+2.17.1
+
